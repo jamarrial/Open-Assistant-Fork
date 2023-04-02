@@ -19,6 +19,10 @@ on:
         required: false
         type: string
         default: 3000
+      inference-server-port:
+        required: false
+        type: string
+        default: 8085
 
 jobs:
   deploy:
@@ -67,10 +71,25 @@ jobs:
       BACKEND_URL: ${{ vars.BACKEND_URL }}
       WEB_NEXT_PUBLIC_BACKEND_URL: ${{ vars.WEB_NEXT_PUBLIC_BACKEND_URL }}
       BACKEND_CORS_ORIGINS: ${{ vars.BACKEND_CORS_ORIGINS }}
+      WEB_INFERENCE_SERVER_HOST: ${{ vars.WEB_INFERENCE_SERVER_HOST }}
+      WEB_ENABLE_CHAT: ${{ vars.WEB_ENABLE_CHAT }}
+      INFERENCE_POSTGRES_PASSWORD: ${{secrets.INFERENCE_POSTGRES_PASSWORD}}
+      INFERENCE_ALLOW_DEBUG_AUTH: ${{vars.INFERENCE_ALLOW_DEBUG_AUTH}}
+      INFERENCE_DEBUG_API_KEYS: ${{vars.INFERENCE_DEBUG_API_KEYS}}
+      INFERENCE_LOG_LEVEL: ${{vars.INFERENCE_LOG_LEVEL}}
+      INFERENCE_ROOT_TOKEN: ${{secrets.INFERENCE_ROOT_TOKEN}}
+      INFERENCE_AUTH_CALLBACK_ROOT: ${{vars.INFERENCE_AUTH_CALLBACK_ROOT}}
+      INFERENCE_AUTH_SALT: ${{secrets.INFERENCE_AUTH_SALT}}
+      INFERENCE_AUTH_SECRET: ${{secrets.INFERENCE_AUTH_SECRET}}
+      INFERENCE_AUTH_DISCORD_CLIENT_ID: ${{secrets.INFERENCE_AUTH_DISCORD_CLIENT_ID}}
+      INFERENCE_AUTH_DISCORD_CLIENT_SECRET: ${{secrets.INFERENCE_AUTH_DISCORD_CLIENT_SECRET}}
+      INFERENCE_AUTH_GITHUB_CLIENT_ID: ${{secrets.INFERENCE_AUTH_GITHUB_CLIENT_ID}}
+      INFERENCE_AUTH_GITHUB_CLIENT_SECRET: ${{secrets.INFERENCE_AUTH_GITHUB_CLIENT_SECRET}}
+      INFERENCE_CORS_ORIGINS: ${{ vars.INFERENCE_CORS_ORIGINS }}
     steps:
       - name: Checkout
         uses: actions/checkout@v2
-      - name: Run playbook
+      - name: Run deploy playbook
         uses: dawidd6/action-ansible-playbook@v2
         with:
           # Required, playbook filepath
@@ -90,3 +109,21 @@ jobs:
             website_port=${{inputs.website-port}} \
             postgres_password=${{secrets.POSTGRES_PASSWORD}} \
             web_api_key=${{secrets.WEB_API_KEY}}"
+
+      - name: Run inference deploy playbook
+        uses: dawidd6/action-ansible-playbook@v2
+        with:
+          # Required, playbook filepath
+          playbook: inference/deploy-server.yaml
+          # Optional, directory where playbooks live
+          directory: ansible
+          # Optional, SSH private key
+          key: ${{secrets.DEV_NODE_PRIVATE_KEY}}
+          # Optional, literal inventory file contents
+          inventory: |
+            [dev]
+            dev01 ansible_host=${{secrets.DEV_NODE_IP}} ansible_connection=ssh ansible_user=web-team
+          options: |
+            --extra-vars "stack_name=${{inputs.stack-name}} \
+            image_tag=${{inputs.image-tag}} \
+            server_port=${{inputs.inference-server-port}}"

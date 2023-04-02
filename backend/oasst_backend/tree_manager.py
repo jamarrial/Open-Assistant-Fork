@@ -2,7 +2,7 @@ import random
 from datetime import datetime, timedelta
 from enum import Enum
 from http import HTTPStatus
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Optional, Tuple
 from uuid import UUID
 
 import numpy as np
@@ -22,13 +22,13 @@ from oasst_backend.models import (
     message_tree_state,
 )
 from oasst_backend.prompt_repository import PromptRepository
+from oasst_backend.scheduled_tasks import hf_feature_extraction, toxicity
 from oasst_backend.utils.database_utils import (
     CommitMode,
     async_managed_tx_method,
     managed_tx_function,
     managed_tx_method,
 )
-from oasst_backend.utils.hugging_face import HfClassificationModel, HfEmbeddingModel, HfUrl, HuggingFaceAPI
 from oasst_backend.utils.ranking import ranked_pairs
 from oasst_shared.exceptions.oasst_api_error import OasstError, OasstErrorCode
 from oasst_shared.schemas import protocol as protocol_schema
@@ -451,6 +451,7 @@ class TreeManager:
             )
 
             if task_type == TaskType.NONE:
+                logger.warning(f"No random tasks currently available, user: {self.pr.user_id}")
                 raise OasstError(
                     f"No tasks of type '{protocol_schema.TaskRequestType.random.value}' are currently available.",
                     OasstErrorCode.TASK_REQUESTED_TYPE_NOT_AVAILABLE,
@@ -467,6 +468,7 @@ class TreeManager:
 
             available_count = task_count_by_type.get(desired_task_type)
             if not available_count:
+                logger.warning(f"No '{desired_task_type.value}' tasks currently available, user: {self.pr.user_id}")
                 raise OasstError(
                     f"No tasks of type '{desired_task_type.value}' are currently available.",
                     OasstErrorCode.TASK_REQUESTED_TYPE_NOT_AVAILABLE,
@@ -730,31 +732,16 @@ class TreeManager:
 
                 if not settings.DEBUG_SKIP_EMBEDDING_COMPUTATION:
                     try:
-                        hugging_face_api = HuggingFaceAPI(
-                            f"{HfUrl.HUGGINGFACE_FEATURE_EXTRACTION.value}/{HfEmbeddingModel.MINILM.value}"
-                        )
-                        embedding = await hugging_face_api.post(interaction.text)
-                        pr.insert_message_embedding(
-                            message_id=message.id, model=HfEmbeddingModel.MINILM.value, embedding=embedding
-                        )
+                        hf_feature_extraction.delay(interaction.text, message.id, pr.api_client.dict())
+                        logger.debug("Extract Embedding")
                     except OasstError:
                         logger.error(
                             f"Could not fetch embbeddings for text reply to {interaction.message_id=} with {interaction.text=} by {interaction.user=}."
                         )
-
                 if not settings.DEBUG_SKIP_TOXICITY_CALCULATION:
                     try:
-                        model_name: str = HfClassificationModel.TOXIC_ROBERTA.value
-                        hugging_face_api: HuggingFaceAPI = HuggingFaceAPI(
-                            f"{HfUrl.HUGGINGFACE_TOXIC_CLASSIFICATION.value}/{model_name}"
-                        )
-
-                        toxicity: List[List[Dict[str, Any]]] = await hugging_face_api.post(interaction.text)
-                        toxicity = toxicity[0][0]
-                        pr.insert_toxicity(
-                            message_id=message.id, model=model_name, score=toxicity["score"], label=toxicity["label"]
-                        )
-
+                        toxicity.delay(interaction.text, message.id, pr.api_client.dict())
+                        logger.debug("Sent Toxicity")
                     except OasstError:
                         logger.error(
                             f"Could not compute toxicity for text reply to {interaction.message_id=} with {interaction.text=} by {interaction.user=}."
@@ -923,6 +910,52 @@ class TreeManager:
         self.update_message_ranks(message_tree_id, rankings_by_message)
         return True
 
+    def ranked_pairs_update(self, rankings: list[MessageReaction]) -> int:
+        assert len(rankings) > 0
+
+        num_updated = 0
+        ordered_ids_list: list[list[UUID]] = [
+            msg_reaction.payload.payload.ranked_message_ids for msg_reaction in rankings
+        ]
+
+        common_set: set[UUID] = set.intersection(*map(set, ordered_ids_list))
+        if len(common_set) < 2:
+            logger.warning("The intersection of ranking results ID sets has less than two elements. Skipping.")
+            return
+
+        # keep only elements in common set
+        ordered_ids_list = [list(filter(lambda x: x in common_set, ids)) for ids in ordered_ids_list]
+        assert all(len(x) == len(common_set) for x in ordered_ids_list)
+
+        logger.debug(f"SORTED MESSAGE IDS {ordered_ids_list}")
+        consensus = ranked_pairs(ordered_ids_list)
+        assert len(consensus) == len(common_set)
+        logger.debug(f"CONSENSUS: {consensus}\n\n")
+
+        # fetch all siblings and index by id
+        siblings = self.pr.fetch_message_siblings(consensus[0], review_result=None, deleted=None)
+        siblings = {m.id: m for m in siblings}
+
+        # set rank for each message that was part of the common set
+        for rank, message_id in enumerate(consensus):
+            message = siblings.get(message_id)
+            if message:
+                if message.rank != rank:
+                    message.rank = rank
+                    self.db.add(message)
+                    num_updated += 1
+            else:
+                logger.warning(f"Message {message_id=} not found among siblings.")
+
+        # clear rank of sibling messages not in consensus
+        for message in siblings.values():
+            if message.id not in consensus and message.rank is not None:
+                message.rank = None
+                self.db.add(message)
+                num_updated += 1
+
+        return num_updated
+
     def update_message_ranks(
         self, message_tree_id: UUID, rankings_by_message: dict[UUID, list[MessageReaction]]
     ) -> bool:
@@ -938,41 +971,8 @@ class TreeManager:
 
         try:
             for rankings in rankings_by_message.values():
-                ordered_ids_list: list[list[UUID]] = [
-                    msg_reaction.payload.payload.ranked_message_ids for msg_reaction in rankings
-                ]
-
-                common_set: set[UUID] = set.intersection(*map(set, ordered_ids_list))
-                if len(common_set) < 2:
-                    logger.warning("The intersection of ranking results ID sets has less than two elements. Skipping.")
-                    continue
-
-                # keep only elements in common set
-                ordered_ids_list = [list(filter(lambda x: x in common_set, ids)) for ids in ordered_ids_list]
-                assert all(len(x) == len(common_set) for x in ordered_ids_list)
-
-                logger.debug(f"SORTED MESSAGE IDS {ordered_ids_list}")
-                consensus = ranked_pairs(ordered_ids_list)
-                assert len(consensus) == len(common_set)
-                logger.debug(f"CONSENSUS: {consensus}\n\n")
-
-                # fetch all siblings and clear ranks
-                siblings = self.pr.fetch_message_siblings(consensus[0], review_result=None, deleted=None)
-                for m in siblings:
-                    m.rank = None
-                    self.db.add(m)
-
-                # index by id
-                siblings = {m.id: m for m in siblings}
-
-                # set rank for each message that was part of the common set
-                for rank, message_id in enumerate(consensus):
-                    msg = siblings.get(message_id)
-                    if msg:
-                        msg.rank = rank
-                        self.db.add(msg)
-                    else:
-                        logger.warning(f"Message {message_id=} not found among siblings.")
+                if len(rankings) > 0:
+                    self.ranked_pairs_update(rankings)
 
         except Exception:
             logger.exception(f"update_message_ranks({message_tree_id=}) failed")
@@ -1311,7 +1311,7 @@ LEFT JOIN message_reaction mr ON mr.task_id = t.id AND mr.payload_type = 'Rankin
         message_tree_id: UUID,
         role_filter: str = "assistant",
     ) -> dict[UUID, list[MessageReaction]]:
-        """Finds all completed ranking restuls for a message_tree"""
+        """Finds all completed ranking results for a message_tree"""
 
         assert role_filter in (None, "assistant", "prompter")
 

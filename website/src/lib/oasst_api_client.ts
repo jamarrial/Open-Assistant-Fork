@@ -1,4 +1,4 @@
-import type { EmojiOp, FetchUserMessagesCursorResponse, Message } from "src/types/Conversation";
+import type { EmojiOp, FetchMessagesCursorResponse, Message } from "src/types/Conversation";
 import { LeaderboardReply, LeaderboardTimeFrame } from "src/types/Leaderboard";
 import { Stats } from "src/types/Stat";
 import type { AvailableTasks } from "src/types/Task";
@@ -52,11 +52,7 @@ export class OasstApiClient {
     }
   }
 
-  private async request<T>(
-    method: "GET" | "POST" | "PUT" | "DELETE",
-    path: string,
-    init?: RequestInit
-  ): Promise<T | null> {
+  private async request<T>(method: "GET" | "POST" | "PUT" | "DELETE", path: string, init?: RequestInit): Promise<T> {
     const resp = await fetch(`${this.oasstApiUrl}${path}`, {
       method,
       ...init,
@@ -198,10 +194,32 @@ export class OasstApiClient {
   }
 
   /**
+   *  Returns the Message's tree state
+   */
+  async fetch_message_tree_state(message_id: string) {
+    return this.get<{
+      message_tree_id: string;
+      state: string;
+      active: boolean;
+      goal_tree_size: number;
+      max_children_count: number;
+      max_depth: number;
+      origin: string;
+    }>(`/api/v1/messages/${message_id}/tree/state`);
+  }
+
+  /**
    * Delete a message by its id
    */
   async delete_message(message_id: string): Promise<void> {
     return this.delete<void>(`/api/v1/messages/${message_id}`);
+  }
+
+  /**
+   * Undelete a message by its id
+   */
+  async undelete_message(message_id: string): Promise<void> {
+    return this.put<void>(`/api/v1/messages/${message_id}/undelete`);
   }
 
   /**
@@ -287,7 +305,7 @@ export class OasstApiClient {
       ...rest
     }: { include_deleted?: boolean; max_count?: number; cursor?: string; direction: "forward" | "back"; desc?: boolean }
   ) {
-    return this.get<FetchUserMessagesCursorResponse>(`/api/v1/users/${user_id}/messages/cursor`, {
+    return this.get<FetchMessagesCursorResponse>(`/api/v1/users/${user_id}/messages/cursor`, {
       ...rest,
       after: direction === "forward" ? cursor : undefined,
       before: direction === "back" ? cursor : undefined,
@@ -359,7 +377,7 @@ export class OasstApiClient {
       ...rest
     }: { include_deleted?: boolean; max_count?: number; cursor?: string; direction: "forward" | "back"; desc?: boolean }
   ) {
-    return this.get<FetchUserMessagesCursorResponse>(`/api/v1/messages/cursor`, {
+    return this.get<FetchMessagesCursorResponse>(`/api/v1/messages/cursor`, {
       ...rest,
       username: user.id,
       auth_method: user.auth_method,
@@ -410,6 +428,31 @@ export class OasstApiClient {
     return this.get<FetchTrollBoardResponse>(`/api/v1/trollboards/${time_frame}`, {
       max_count: limit,
       enabled: enabled,
+    });
+  }
+
+  fetch_messages_cursor({
+    direction,
+    cursor,
+    ...rest
+  }: {
+    direction: "back" | "forward";
+    cursor?: string;
+    user_id?: string;
+    auth_method?: string;
+    username?: string;
+    api_client_id?: string;
+    only_roots?: boolean;
+    include_deleted?: boolean;
+    max_count?: number;
+    desc?: boolean;
+    lang?: string;
+    include_user?: boolean;
+  }) {
+    return this.get<FetchMessagesCursorResponse>("/api/v1/messages/cursor", {
+      ...rest,
+      after: direction === "forward" ? cursor : undefined,
+      before: direction === "back" ? cursor : undefined,
     });
   }
 }

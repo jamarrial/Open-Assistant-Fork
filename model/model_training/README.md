@@ -2,15 +2,34 @@
 
 ## Requirements
 
-`pip install .`
+`pip install -e ..` (pyproject.toml resides in the parent directory)
+
+Make sure the oasst_data module is installed
+
+```bash
+python -m pip install ../../oasst-data/
+```
 
 Run tests: `pytest .`
+
+You might run into a `SystemExit` here for the test
+`tests/test_patched_gpt_neox.py::test_flash_attention_patch`. If so just follow
+the warning and install `flash_attn`:
+
+```bash
+python -m pip install flash_attn
+```
 
 Start training SFT model
 
 ```bash
-python trainer_sft.py --configs defaults galactica-125m
+python trainer_sft.py --configs galactica-125m
 ```
+
+If you want to get started with a small amount of test data to begin with, add
+the config `webgpt_dataset_only`.
+
+If you kill and want to resume, see the `--resume_from_checkpoint` option.
 
 For `wandb`: update the `entity` argument in `trainer_sft.py`'s call to
 `wandb.init` to be your weights and biases username per
@@ -73,7 +92,7 @@ This works with `torch.distributed`.
 To experiment with the Open Assistant data simply run:
 
 ```bash
-python trainer_sft.py --configs defaults oasst_export_eu galactica-125m
+python trainer_sft.py --configs oasst_export_eu galactica-125m
 ```
 
 Change the `input_file_path` in the `oasst_export_eu` from the
